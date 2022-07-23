@@ -1,62 +1,72 @@
-import { getEventsFor, publishEvent } from "./repository"
 import {
   Aggregate,
-  Event,
-  AggregateService,
-  CommandHandlers,
-  Fold,
-  Rehydrator,
+  AggregateMeta,
   Command,
-  CommandService,
+  CommandHandler,
+  CreateAggregateProps,
+  Event,
+  EventMeta,
+  StoreEvent,
 } from "types"
 
-export function createAggregateRoot<
+export function createAggregate<
   A extends Aggregate,
   C extends Command,
   E extends Event
->(
-  rehydrator: Rehydrator<A>,
-  cmd: CommandHandlers<A, C, E>
-): AggregateService<A, C, E> {
-  const wrappedCmd: CommandService<C, E> = {} as any
-  const keys = Object.keys(cmd) as Array<C["type"]>
-
-  for (const type of keys) {
-    wrappedCmd[type] = async (id, body) => {
-      // rehydrate the aggregate
-      const agg = await rehydrator(id)
-
-      // perform the command and get the resulting event
-      const result = await cmd[type](agg, body)
-      await onCommandResult(result, agg)
+>(props: CreateAggregateProps<A, E>) {
+  function toNextAggregate(
+    next: A & AggregateMeta,
+    ev: StoreEvent<E>
+  ): A & AggregateMeta {
+    return {
+      ...next,
+      ...props.fold(ev.data, next, toMeta(ev)),
+      version: ev.version,
+      aggregateId: ev.aggregateId,
     }
   }
 
-  async function onCommandResult(result: E | void, agg: A) {
-    if (!result) return
-    publishEvent("players", agg.id, agg.version + 1, result)
+  async function getAggregate(id: string): Promise<A & AggregateMeta> {
+    const events = await props.store.getAllEventsFor(id, props.stream)
+    let version = 0
+
+    const eventCount = events.length
+    if (eventCount) {
+      version = events[eventCount - 1].version
+    }
+
+    let initAgg: A & AggregateMeta = { ...props.init, aggregateId: id, version }
+    return events.reduce(toNextAggregate, initAgg)
+  }
+
+  function cmd<TCmd extends C["type"]>(
+    cmdType: TCmd,
+    handler: CommandHandler<
+      A & AggregateMeta,
+      Extract<C, { type: typeof cmdType }>,
+      E
+    >
+  ) {
+    return async (id: string, cmd: Extract<C, { type: typeof cmdType }>) => {
+      const agg = await getAggregate(id)
+      const event = await handler(agg, cmd)
+
+      props.store.append(event, props.stream, id, agg.version + 1)
+    }
   }
 
   return {
-    getAggregate: rehydrator,
-    cmd: wrappedCmd,
+    getAggregate,
+    cmd,
   }
 }
 
-export function createRehydrator<A extends Aggregate, E extends Event>(
-  init: A,
-  fold: Fold<A, E>
-): Rehydrator<A> {
-  return async function getAggregate(id: string) {
-    const wrappedEvents = await getEventsFor(id)
-    let version = 0
-
-    if (wrappedEvents.length) {
-      version = wrappedEvents[wrappedEvents.length - 1].version
-    }
-
-    const agg: A = { ...init, id, version }
-    const events: E[] = wrappedEvents.map((stored) => stored.event)
-    return events.reduce<A>(fold, agg)
+function toMeta(ev: StoreEvent): EventMeta {
+  return {
+    aggregateId: ev.aggregateId,
+    position: ev.position,
+    stream: ev.stream,
+    timestamp: ev.timestamp,
+    version: ev.version,
   }
 }

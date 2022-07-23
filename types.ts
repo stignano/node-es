@@ -1,36 +1,49 @@
-export type Aggregate = {
-  id: string
-  version: number
-}
+export type Aggregate = {}
+export type AggregateMeta = { aggregateId: string; version: number }
 
-export type Entity = {
-  id: string
-}
+export type Command = { type: string }
 
-export type Event = {
-  type: string
-}
-
-export type Command = {
-  type: string
-}
-
-export type CommandService<C extends Command, E extends Event> = {
-  [key in C["type"]]: (
-    id: string,
-    body: Omit<Extract<C, { type: key }>, "type">
-  ) => Promise<E | void>
-}
-
-export type CommandHandlers<
+export type CommandHandler<
   A extends Aggregate,
   C extends Command,
   E extends Event
-> = {
-  [key in C["type"]]: (
-    agg: A,
-    body: Omit<Extract<C, { type: key }>, "type">
-  ) => Promise<E | void>
+> = (aggregate: A, command: C) => Promise<E>
+
+export type WrappedCommandHandler<C extends Command> = (
+  id: string,
+  command: C
+) => Promise<void>
+
+export type Event = { type: string }
+
+export type EventMeta = {
+  stream: string
+  position: any
+  version: number
+  timestamp: Date
+  aggregateId: string
+}
+export type StoreEvent<T = unknown> = EventMeta & { data: T }
+
+export type EventStore<E extends Event> = {
+  getAllEventsFor: (
+    aggregateId: string,
+    stream: string,
+    startPosition?: number
+  ) => Promise<Array<StoreEvent<E>>>
+  append: (
+    event: E,
+    stream: string,
+    aggregateId: string,
+    nextVersion: number
+  ) => Promise<void>
+}
+
+export type CreateAggregateProps<A extends Aggregate, E extends Event> = {
+  store: EventStore<E>
+  stream: string
+  init: A
+  fold: Fold<A, E>
 }
 
 export type AggregateService<
@@ -38,10 +51,14 @@ export type AggregateService<
   C extends Command,
   E extends Event
 > = {
-  getAggregate: Rehydrator<A>
-  cmd: CommandService<C, E>
+  getAggregate: (id: string) => Promise<A & AggregateMeta>
+  registerCommand: (
+    handler: CommandHandler<A, C, E>
+  ) => WrappedCommandHandler<C>
 }
 
-export type Fold<A, E> = (agg: A, ev: E) => A
-
-export type Rehydrator<A> = (id: string) => Promise<A>
+export type Fold<A, E> = (
+  ev: E,
+  agg: A & AggregateMeta,
+  meta: EventMeta
+) => Partial<A>
